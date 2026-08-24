@@ -77,18 +77,23 @@ jobs:
           git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${REPO}.git" "$SRC"
           cd "$SRC"
 
-          # Cria os diretorios de bind mount que ainda nao existem. O Docker do
-          # DSM nao cria sozinho e falha com "Bind mount failed: ... does not
-          # exist". Usa `compose config` porque ele resolve variaveis e caminhos
-          # relativos - ler o YAML cru nao veria ${VAR:-default}.
+          # Cria os diretorios de bind mount. O Docker do DSM nao cria sozinho e
+          # falha com "Bind mount failed: ... does not exist".
+          #
+          # O mkdir tem que acontecer no HOST, nao aqui: este passo roda dentro
+          # do container do runner, onde /volume1 nao existe - um mkdir local
+          # criaria a pasta no filesystem do runner, invisivel para o daemon.
+          # Por isso um container descartavel monta a raiz do host e cria la.
+          # Nao amplia privilegio: quem tem o docker.sock ja e root no host.
+          #
+          # `compose config` porque ele resolve variaveis e caminhos relativos -
+          # ler o YAML cru nao enxergaria ${VAR:-default}.
           docker compose -f "$COMPOSE" -p "$PROJETO" config 2>/dev/null             | awk '/type: bind/{b=1} b && /source:/{print $2; b=0}'             | while read -r CAMINHO; do
                 case "$CAMINHO" in
                   /var/run/*|*.sock|"") continue ;;   # socket nao e diretorio
                 esac
-                if [ ! -e "$CAMINHO" ]; then
-                  echo "criando volume ausente: $CAMINHO"
-                  mkdir -p "$CAMINHO"
-                fi
+                echo "garantindo volume no host: $CAMINHO"
+                docker run --rm -v /:/host --entrypoint mkdir busybox                   -p "/host$CAMINHO"
               done
 
           # Adocao de container pre-existente. Um container criado fora deste
