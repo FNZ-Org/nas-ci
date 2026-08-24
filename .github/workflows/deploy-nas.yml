@@ -77,6 +77,20 @@ jobs:
           git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${REPO}.git" "$SRC"
           cd "$SRC"
 
+          # Cria os diretorios de bind mount que ainda nao existem. O Docker do
+          # DSM nao cria sozinho e falha com "Bind mount failed: ... does not
+          # exist". Usa `compose config` porque ele resolve variaveis e caminhos
+          # relativos - ler o YAML cru nao veria ${VAR:-default}.
+          docker compose -f "$COMPOSE" -p "$PROJETO" config 2>/dev/null             | awk '/type: bind/{b=1} b && /source:/{print $2; b=0}'             | while read -r CAMINHO; do
+                case "$CAMINHO" in
+                  /var/run/*|*.sock|"") continue ;;   # socket nao e diretorio
+                esac
+                if [ ! -e "$CAMINHO" ]; then
+                  echo "criando volume ausente: $CAMINHO"
+                  mkdir -p "$CAMINHO"
+                fi
+              done
+
           # Adocao de container pre-existente. Um container criado fora deste
           # compose (por outra stack, pelo Container Manager ou por docker run)
           # tem o nome que o compose quer usar, mas nao a label de projeto - e o
