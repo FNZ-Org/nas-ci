@@ -1,0 +1,16 @@
+# Teste de diagnostico: repositorio PUBLICO tem minutos de Actions ilimitados.
+# Se este workflow roda aqui mas o mesmo tipo de job falha com startup_failure
+# num repo PRIVADO da mesma org, o problema e cota/billing de minutos, nao
+# politica de Actions nem o workflow em si.
+name: Teste de minutos
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "runner do GitHub executou neste repositorio publico"
