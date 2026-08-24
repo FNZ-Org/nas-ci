@@ -40,10 +40,16 @@ on:
         description: Nome da stack do compose e do container
         type: string
         required: true
-      health-url:
-        description: URL checada dentro do NAS apos subir. Vazio pula a checagem.
+      health-port:
+        description: >
+          Porta publicada no host a checar depois de subir. Vazio pula a checagem.
+          Nao passe URL completa: o healthcheck roda DENTRO do container do
+          runner, onde 127.0.0.1 e o proprio runner e nao o NAS.
         type: string
         default: ""
+      health-path:
+        type: string
+        default: "/"
       compose-file:
         type: string
         default: docker-compose.yml
@@ -83,15 +89,27 @@ jobs:
           rm -rf "$SRC"
 
       - name: Conferir saude
-        if: inputs.health-url != ''
+        if: inputs.health-port != ''
+        env:
+          PORTA: ${{ inputs.health-port }}
+          CAMINHO: ${{ inputs.health-path }}
+          PROJETO: ${{ inputs.projeto }}
         run: |
+          set -u
+          # O passo roda dentro do container do runner: 127.0.0.1 aqui e o
+          # proprio runner, nao o NAS. O gateway da rota default e o host, que
+          # e onde as portas dos servicos estao publicadas.
+          HOST=$(ip route | awk '/^default/ {print $3; exit}')
+          [ -n "$HOST" ] || HOST=172.17.0.1
+          ALVO="http://$HOST:$PORTA$CAMINHO"
+          echo "checando $ALVO"
           for i in $(seq 1 24); do
-            if curl -fsS "${{ inputs.health-url }}" >/dev/null; then
+            if curl -fsS -o /dev/null "$ALVO"; then
               echo "no ar apos $((i * 5))s"
               exit 0
             fi
             sleep 5
           done
           echo "nao respondeu em 120s - ultimos logs:"
-          docker compose -p "${{ inputs.projeto }}" logs --tail 60
+          docker compose -p "$PROJETO" logs --tail 60
           exit 1
