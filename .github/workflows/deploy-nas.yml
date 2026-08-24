@@ -77,6 +77,21 @@ jobs:
           git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${REPO}.git" "$SRC"
           cd "$SRC"
 
+          # Adocao de container pre-existente. Um container criado fora deste
+          # compose (por outra stack, pelo Container Manager ou por docker run)
+          # tem o nome que o compose quer usar, mas nao a label de projeto - e o
+          # compose entao falha com "container name is already in use" em vez de
+          # assumir o controle. Remove so o que tem exatamente o nome declarado
+          # NESTE compose e pertence a outro projeto.
+          grep -E '^[[:space:]]+container_name:' "$COMPOSE"             | awk '{print $2}' | tr -d '"'"'"'"' | while read -r NOME; do
+              [ -n "$NOME" ] || continue
+              DONO=$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.project" }}' "$NOME" 2>/dev/null) || continue
+              if [ "$DONO" != "$PROJETO" ]; then
+                echo "adotando container '$NOME' (pertencia a '${DONO:-nenhum projeto}')"
+                docker rm -f "$NOME"
+              fi
+            done
+
           # -p fixa o nome da stack, independente do diretorio do clone (que
           # muda a cada deploy). Sem isso o compose criaria uma stack nova toda
           # vez e deixaria a anterior orfa rodando.
