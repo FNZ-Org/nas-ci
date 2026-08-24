@@ -1,38 +1,45 @@
-# Workflow REUTILIZAVEL: builda a imagem no GitHub, publica no GHCR e manda o
-# NAS puxar. Todo projeto do homelab chama este arquivo em vez de copiar 80
-# linhas de YAML - corrigir um bug aqui conserta o deploy de todos de uma vez.
+# Workflow REUTILIZAVEL de deploy no NAS. Todo projeto do homelab chama este
+# arquivo em vez de copiar dezenas de linhas de YAML - corrigir um bug aqui
+# conserta o deploy de todos de uma vez.
 #
-# Uso no repo do projeto:
+# Uso no repo do projeto (.github/workflows/ci.yml):
 #
+#   name: Deploy no NAS
+#   on:
+#     push: { branches: [main] }
+#     workflow_dispatch: {}
 #   jobs:
-#     testes:
-#       runs-on: ubuntu-latest
-#       steps: [...]
 #     deploy:
-#       needs: testes
-#       uses: SUA-ORG/nas-ci/.github/workflows/deploy-nas.yml@main
+#       uses: FNZ-Org/nas-ci/.github/workflows/deploy-nas.yml@main
 #       with:
-#         projeto: perftrack
-#         health-url: http://127.0.0.1:4100/api/health
-#       secrets: inherit
+#         projeto: meuprojeto
+#         health-url: http://127.0.0.1:1234/health
 #
-# O build NAO acontece no NAS de proposito: Synology tem CPU fraca e compilar
-# pandas/node la levaria minutos disputando CPU com Jellyfin e companhia.
-# O NAS so puxa uma imagem pronta.
+# POR QUE TUDO RODA NO RUNNER DO NAS
+#
+# Runner self-hosted nao consome minutos de Actions. A FNZ-Org nao tem cota de
+# minutos para repositorio PRIVADO - um job em `ubuntu-latest` num repo privado
+# da org morre com startup_failure antes de criar qualquer job. (Verificado: o
+# mesmo job roda sem problema no nas-ci, que e publico.)
+#
+# Consequencia pratica: o NAS builda a imagem, entao o build demora alguns
+# minutos em vez de segundos. Em troca, nao depende de cota nem de registry, e o
+# repositorio continua privado.
+#
+# Os TESTES nao tem job proprio de proposito: cada projeto roda os seus dentro
+# do build da imagem (um `RUN pytest` no Dockerfile). Se um teste quebra, a
+# imagem nao e produzida e o deploy nao acontece - mesma garantia, sem precisar
+# de runner do GitHub.
 
-name: Build e deploy no NAS
+name: Deploy no NAS
 
 on:
   workflow_call:
     inputs:
       projeto:
-        description: Nome do container, da stack e do pacote no GHCR
+        description: Nome da stack do compose e do container
         type: string
         required: true
-      contexto:
-        description: Diretorio do build (onde esta o Dockerfile)
-        type: string
-        default: "."
       health-url:
         description: URL checada dentro do NAS apos subir. Vazio pula a checagem.
         type: string
@@ -42,87 +49,49 @@ on:
         default: docker-compose.yml
 
 jobs:
-  imagem:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    outputs:
-      tag: ${{ steps.meta.outputs.tag }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - id: meta
-        run: |
-          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "imagem=ghcr.io/$OWNER/${{ inputs.projeto }}" >> "$GITHUB_OUTPUT"
-          echo "tag=ghcr.io/$OWNER/${{ inputs.projeto }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
-
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/build-push-action@v6
-        with:
-          context: ${{ inputs.contexto }}
-          push: true
-          tags: |
-            ${{ steps.meta.outputs.imagem }}:latest
-            ${{ steps.meta.outputs.tag }}
-          # Cache no proprio registry: o build seguinte reaproveita as camadas.
-          cache-from: type=registry,ref=${{ steps.meta.outputs.imagem }}:buildcache
-          cache-to: type=registry,ref=${{ steps.meta.outputs.imagem }}:buildcache,mode=max
-
   deploy:
-    needs: imagem
-    # Runner de nivel ORGANIZACAO: um so, dentro do NAS, atende TODOS os repos.
-    # So faz conexoes de saida - nada abre porta no roteador.
     runs-on: [self-hosted, synology]
     permissions:
       contents: read
-      packages: read
     steps:
-      - name: Puxar imagem e subir
+      - name: Checkout + build + subir
         env:
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ATOR: ${{ github.actor }}
+          TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
           PROJETO: ${{ inputs.projeto }}
-          IMAGEM: ${{ needs.imagem.outputs.tag }}
           COMPOSE: ${{ inputs.compose-file }}
         run: |
           set -euo pipefail
-          echo "$TOKEN" | docker login ghcr.io -u "$ATOR" --password-stdin
 
-          # So o compose e baixado, nunca o codigo-fonte: a imagem ja vem
-          # pronta do GHCR.
+          # Checkout manual via git: evita a action actions/checkout, que toma
+          # 429 do codeload.github.com no runner do NAS.
           SRC="$RUNNER_TEMP/$PROJETO-$SHA"
           rm -rf "$SRC"
           git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${REPO}.git" "$SRC"
           cd "$SRC"
 
-          # A variavel <PROJETO>_IMAGE fixa a tag exata deste commit no compose.
-          VAR="$(echo "$PROJETO" | tr '[:lower:]-' '[:upper:]_')_IMAGE"
-          export "$VAR=$IMAGEM"
-          docker compose -f "$COMPOSE" -p "$PROJETO" pull
-          docker compose -f "$COMPOSE" -p "$PROJETO" up -d --no-build --remove-orphans
+          # -p fixa o nome da stack, independente do diretorio do clone (que
+          # muda a cada deploy). Sem isso o compose criaria uma stack nova toda
+          # vez e deixaria a anterior orfa rodando.
+          docker compose -f "$COMPOSE" -p "$PROJETO" up -d --build --remove-orphans
           docker image prune -f
+
+          # O clone e descartavel. Volumes de dados vivem fora dele - se algum
+          # projeto apontasse volume para dentro do checkout, perderia tudo aqui.
+          cd "$RUNNER_TEMP"
           rm -rf "$SRC"
 
       - name: Conferir saude
         if: inputs.health-url != ''
         run: |
-          for i in $(seq 1 20); do
+          for i in $(seq 1 24); do
             if curl -fsS "${{ inputs.health-url }}" >/dev/null; then
-              echo "no ar"
+              echo "no ar apos $((i * 5))s"
               exit 0
             fi
             sleep 5
           done
-          echo "nao respondeu em 100s"
-          docker compose -p "${{ inputs.projeto }}" logs --tail 50
+          echo "nao respondeu em 120s - ultimos logs:"
+          docker compose -p "${{ inputs.projeto }}" logs --tail 60
           exit 1
